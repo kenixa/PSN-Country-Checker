@@ -230,19 +230,15 @@ def verify_country_proxies(country: str, candidates: list[str]) -> list[str]:
 
 
 def title_and_nominal(anchor) -> tuple[str, float, str] | None:
-    # Eneba's denomination picker stores its full title in aria-label while visible
-    # text often only contains "60 EUR · €47.71 · 1.26 EUR per €1".
-    img = anchor.find("img", alt=True)
-    title = ""
-    if img:
-        title = str(img.get("alt") or "").strip()
+    """Read the full variant label from Eneba's own denomination-picker card."""
     title = (
-        title
+        str(anchor.get("aria-label") or "").strip()
         or str(anchor.get("title") or "").strip()
-        or str(anchor.get("aria-label") or "").strip()
-        or str(anchor.get("data-testid") or "").strip()
-        or anchor.get_text(" ", strip=True)
     )
+    if not title:
+        img = anchor.find("img", alt=True)
+        title = str(img.get("alt") or "").strip() if img else ""
+    title = title or anchor.get_text(" ", strip=True)
     pat = re.compile(r"PlayStation\s+Network\s+Card\s+(" + NUMBER + r")\s+([A-Z]{3})\b", re.I)
     match = pat.search(title)
     if not match:
@@ -344,7 +340,95 @@ def price_from_card_text(
     return None
 
 
+def parse_eneba_ratio(anchor) -> tuple[float, str, str] | None:
+    """Read Eneba's displayed ratio text (for example '1.26 EUR per €1').
+
+    We intentionally do not derive this from the price or any FX service.
+    """
+    node = anchor.select_one(".ANNnf5")
+    candidates = [node] if node else []
+    if not candidates:
+        candidates = anchor.find_all("span")
+    pattern = re.compile(
+        r"^\s*(?P<value>\d+(?:[.,]\d+)?)\s+(?P<unit>[A-Z]{3})\s+per\s+€\s*1\s*$",
+        re.I,
+    )
+    for candidate in candidates:
+        source_text = candidate.get_text(" ", strip=True)
+        match = pattern.match(source_text)
+        if not match:
+            continue
+        value = parse_number(match.group("value"))
+        if value is not None:
+            # ratio_display is the exact number string shown by Eneba (decimal point/comma preserved).
+            return value, match.group("value"), source_text
+    return None
+
+
+def parse_eneba_price_display(raw: str, fallback_currency: str) -> tuple[float, str] | None:
+    """Parse only the price string Eneba displays, retaining its original display separately."""
+    text = re.sub(r"\s+", " ", str(raw or "")).strip()
+    if not text:
+        return None
+
+    # Currency symbol before amount (most common on Eneba); longer symbols first.
+    symbol_pattern = re.compile(
+        r"^(?P<symbol>AU\$|A\$|CA\$|C\$|US\$|NZ\$|€|£|\$)\s*(?P<amount>" + NUMBER + r")$",
+        re.I,
+    )
+    match = symbol_pattern.match(text)
+    if match:
+        symbol = match.group("symbol").upper()
+        currency_map = {
+            "€": "EUR", "£": "GBP", "AU$": "AUD", "A$": "AUD",
+            "CA$": "CAD", "C$": "CAD", "US$": "USD", "NZ$": "NZD",
+            "$": str(fallback_currency or "EUR").upper(),
+        }
+        amount = parse_number(match.group("amount"))
+        currency = currency_map.get(symbol, str(fallback_currency or "EUR").upper())
+        return (amount, currency) if amount and currency in CURRENCY_CODES else None
+
+    # Or a currency code before/after the amount, for example '76.53 AUD' or 'EUR 47.71'.
+    code_after = re.compile(r"^(?P<amount>" + NUMBER + r")\s*(?P<currency>" + CURRENCY_ALT + r")$", re.I)
+    code_before = re.compile(r"^(?P<currency>" + CURRENCY_ALT + r")\s*(?P<amount>" + NUMBER + r")$", re.I)
+    for pattern in (code_after, code_before):
+        match = pattern.match(text)
+        if match:
+            amount = parse_number(match.group("amount"))
+            currency = match.group("currency").upper()
+            return (amount, currency) if amount and currency in CURRENCY_CODES else None
+    return None
+
+
+def eneba_price_from_variant(anchor, fallback_currency: str) -> tuple[float, str, str] | None:
+    """Use the exact price node from Eneba's value-picker card, not surrounding text."""
+    node = anchor.select_one(".L5ErLT.w7tD3i")
+    if node is None:
+        # Conservative structural fallback: accept only a span containing a stand-alone price label.
+        price_re = re.compile(
+            r"^(?:(?:AU|A|CA|C|US|NZ)\$|€|£|\$)\s*" + NUMBER +
+            r"$|^" + NUMBER + r"\s*(?:" + CURRENCY_ALT + r")$|^(?:" + CURRENCY_ALT + r")\s*" + NUMBER + r"$",
+            re.I,
+        )
+        for span in anchor.find_all("span"):
+            text = span.get_text(" ", strip=True)
+            if not text or "per" in text.lower() or "cashback" in text.lower():
+                continue
+            if price_re.match(text):
+                node = span
+                break
+    if node is None:
+        return None
+    display = node.get_text(" ", strip=True)
+    parsed = parse_eneba_price_display(display, fallback_currency)
+    if not parsed:
+        return None
+    amount, currency = parsed
+    return amount, currency, display
+
+
 def extract_deals(html: str, region: dict, checked_ms: int) -> list[dict]:
+    """Extract German PSN denominations and the ratio printed by Eneba itself."""
     soup = BeautifulSoup(html, "html.parser")
     deals: list[dict] = []
     seen: set[str] = set()
@@ -355,34 +439,24 @@ def extract_deals(html: str, region: dict, checked_ms: int) -> list[dict]:
         title, nominal_amount, nominal_currency = parsed
         if not is_german_psn_card(title, nominal_currency):
             continue
+
+        ratio = parse_eneba_ratio(anchor)
+        price = eneba_price_from_variant(anchor, region["currency"])
+        # No guessing: only list a card if Eneba itself exposes both the ratio and price.
+        if not ratio or not price:
+            continue
+
         href = urljoin("https://www.eneba.com/", str(anchor.get("href") or ""))
         parsed_url = urlparse(href)
         if parsed_url.scheme != "https" or parsed_url.hostname not in ("www.eneba.com", "eneba.com"):
             continue
-        # Strip campaign/query fragments to deduplicate consistently.
         href = f"https://www.eneba.com{parsed_url.path}"
         if href in seen:
             continue
         seen.add(href)
-        best_text = ""
-        parent = anchor
-        for _ in range(8):
-            if parent.parent is None:
-                break
-            parent = parent.parent
-            text = parent.get_text(" ", strip=True)
-            if len(text) > 1400:
-                break
-            if re.search(r"\bfrom\b|\bab\b", text, re.I) and "PlayStation Network Card" in text:
-                best_text = text
-                if len(text) <= 650:
-                    break
-        if not best_text:
-            best_text = anchor.parent.get_text(" ", strip=True) if anchor.parent else anchor.get_text(" ", strip=True)
-        price = price_from_card_text(best_text, region["currency"], nominal_amount, nominal_currency)
-        if not price:
-            continue
-        price_amount, price_currency = price
+
+        ratio_value, ratio_display, ratio_text = ratio
+        price_amount, price_currency, price_display = price
         deals.append({
             "title": title,
             "href": href,
@@ -393,6 +467,12 @@ def extract_deals(html: str, region: dict, checked_ms: int) -> list[dict]:
             "nominalCurrency": nominal_currency,
             "priceAmount": price_amount,
             "priceCurrency": price_currency,
+            "priceDisplay": price_display,
+            "price": price_display,
+            "ratio": ratio_value,
+            "ratioDisplay": ratio_display,
+            "ratioText": ratio_text,
+            "ratioSource": "eneba_display",
             "refreshedAt": checked_ms,
         })
     return deals
@@ -454,11 +534,9 @@ def fetch_region(region: dict) -> dict:
                 if old is None:
                     deduped[key] = deal
                     continue
-                new_currency = str(deal.get("priceCurrency") or "EUR")
-                old_currency = str(old.get("priceCurrency") or "EUR")
-                new_amount = float(deal.get("priceAmount") or 0)
-                old_amount = float(old.get("priceAmount") or 0)
-                if new_currency == old_currency and new_amount > 0 and (old_amount <= 0 or new_amount < old_amount):
+                new_ratio = float(deal.get("ratio") or 0)
+                old_ratio = float(old.get("ratio") or 0)
+                if new_ratio > old_ratio:
                     deduped[key] = deal
             return {"country": country, "ok": True, "deals": list(deduped.values()), "reason": ""}
 
@@ -523,33 +601,41 @@ def select_regions() -> list[dict]:
     return chosen
 
 
-def make_deals_ranked(deals: list[dict], rates: dict[str, float], now_ms: int) -> list[dict]:
+def make_deals_ranked(deals: list[dict], now_ms: int) -> list[dict]:
     by_key: dict[str, dict] = {}
-    for d in deals:
-        refreshed = int(d.get("refreshedAt") or 0)
+    for source in deals:
+        refreshed = int(source.get("refreshedAt") or 0)
         if not refreshed or (now_ms - refreshed) > DEAL_MAX_AGE_SECONDS * 1000:
             continue
-        nominal_eur = to_eur(float(d.get("nominalAmount") or 0), str(d.get("nominalCurrency") or "EUR"), rates)
-        price_eur = to_eur(float(d.get("priceAmount") or 0), str(d.get("priceCurrency") or "EUR"), rates)
-        if not nominal_eur or not price_eur or nominal_eur <= 0 or price_eur <= 0:
+        if source.get("ratioSource") != "eneba_display":
             continue
-        d = dict(d)
-        d["nominalEur"] = round(nominal_eur, 4)
-        d["priceEur"] = round(price_eur, 4)
-        d["ratio"] = round(nominal_eur / price_eur, 6)
-        d["nominal"] = f'{d.get("nominalAmount")} {d.get("nominalCurrency")}'
-        d["price"] = f'{d.get("priceAmount")} {d.get("priceCurrency")}'
+        if not is_german_psn_card(str(source.get("title") or ""), str(source.get("nominalCurrency") or "")):
+            continue
+        try:
+            ratio_value = float(source.get("ratio"))
+            nominal_amount = float(source.get("nominalAmount"))
+        except (TypeError, ValueError):
+            continue
+        if ratio_value <= 0 or nominal_amount <= 0:
+            continue
+        d = dict(source)
+        # Germany-only card face value is EUR; this is a denomination label, not an FX conversion.
+        d["nominalEur"] = nominal_amount
+        d["nominal"] = f'{source.get("nominalAmount")} {source.get("nominalCurrency")}'
+        d["price"] = str(source.get("priceDisplay") or source.get("price") or "")
+        d["ratio"] = ratio_value  # exact numeric value parsed from Eneba's displayed ratio
+        d["ratioDisplay"] = str(source.get("ratioDisplay") or ratio_value)
+        d["ratioText"] = str(source.get("ratioText") or f'{d["ratioDisplay"]} EUR per €1')
         d["refreshedAtIso"] = utc_iso(refreshed)
-        key = f"{d.get('href')}|{d.get('country')}"
-        if key not in by_key or d["ratio"] > by_key[key]["ratio"]:
+        key = f'{d.get("href")}|{d.get("country")}'
+        if key not in by_key or ratio_value > float(by_key[key].get("ratio") or 0):
             by_key[key] = d
-    return sorted(by_key.values(), key=lambda x: x["ratio"], reverse=True)[:20]
+    return sorted(by_key.values(), key=lambda item: float(item.get("ratio") or 0), reverse=True)[:20]
 
 
 def main() -> int:
     now_ms = timestamp_ms()
     previous = load_previous_data()
-    rates = get_fx_rates()
     selected = select_regions()
     selected_codes = {r["country"] for r in selected}
     old_deals = previous.get("allDeals", previous.get("deals", []))
@@ -560,6 +646,8 @@ def main() -> int:
         if isinstance(d, dict)
         and (now_ms - int(d.get("refreshedAt") or 0)) <= DEAL_MAX_AGE_SECONDS * 1000
         and is_german_psn_card(str(d.get("title") or ""), str(d.get("nominalCurrency") or ""))
+        and d.get("ratioSource") == "eneba_display"
+        and d.get("ratioDisplay") is not None
     ]
 
     old_status = previous.get("regionStatus") if isinstance(previous.get("regionStatus"), dict) else {}
@@ -588,16 +676,16 @@ def main() -> int:
             detail = "" if result["ok"] else f" · Grund: {result.get('reason') or 'unbekannt'}"
             log(f"{region['country']}: {'OK' if result['ok'] else 'nicht verfügbar'} · {len(result['deals'])} Treffer{detail}")
 
-    # Recompute latest ranking using current FX data; stale entries are discarded.
+    # Rank by the ratio value printed on Eneba's own card; stale/legacy FX-derived entries are discarded.
     all_deals = []
     for d in kept_deals:
         if (now_ms - int(d.get("refreshedAt") or 0)) <= DEAL_MAX_AGE_SECONDS * 1000:
             all_deals.append(d)
-    ranked = make_deals_ranked(all_deals, rates, now_ms)
+    ranked = make_deals_ranked(all_deals, now_ms)
     succeeded = sum(1 for r in results if r["ok"])
     note = ""
     if not ranked:
-        note = "Noch keine bestätigten deutschen PSN-Angebote. Proxies werden nur für den Abruf aus anderen Ländern verwendet; die Karten müssen weiterhin DE/Germany sein. Öffentliche Länder-Proxys sind unzuverlässig; die nächste automatische Aktualisierung erfolgt in etwa fünf Minuten."
+        note = "Noch keine bestätigten deutschen PSN-Angebote mit einem direkt von Eneba ausgelesenen Preisverhältnis. Es werden keine Verhältnisse aus Wechselkursen nachgerechnet; die nächste Aktualisierung folgt nach dem Workflow-Zeitplan."
     payload = {
         "generatedAt": now_ms,
         "generatedAtIso": utc_iso(now_ms),
@@ -614,6 +702,7 @@ def main() -> int:
         "updateIntervalMinutes": 5,
         "dealDataMaxAgeMinutes": DEAL_MAX_AGE_SECONDS // 60,
         "proxySources": ["ProxyScrape API", "ProxyScrape CDN", "HProxy", "Databay", "Proxifly"],
+        "ratioSource": "Eneba-Webseitenanzeige (kein eigenes FX-Ratio)",
     }
     DOCS.mkdir(parents=True, exist_ok=True)
     DATA_FILE.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
