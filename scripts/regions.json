@@ -1,0 +1,320 @@
+[
+  {
+    "name": "Deutschland",
+    "country": "DE",
+    "currency": "EUR",
+    "slug": "germany"
+  },
+  {
+    "name": "USA",
+    "country": "US",
+    "currency": "USD",
+    "slug": "united-states"
+  },
+  {
+    "name": "Polen",
+    "country": "PL",
+    "currency": "PLN",
+    "slug": "poland"
+  },
+  {
+    "name": "Brasilien",
+    "country": "BR",
+    "currency": "BRL",
+    "slug": "brazil"
+  },
+  {
+    "name": "Vereinigtes Königreich",
+    "country": "GB",
+    "currency": "GBP",
+    "slug": "united-kingdom"
+  },
+  {
+    "name": "Frankreich",
+    "country": "FR",
+    "currency": "EUR",
+    "slug": "france"
+  },
+  {
+    "name": "Ungarn",
+    "country": "HU",
+    "currency": "HUF",
+    "slug": "hungary"
+  },
+  {
+    "name": "Australien",
+    "country": "AU",
+    "currency": "AUD",
+    "slug": "australia"
+  },
+  {
+    "name": "Kanada",
+    "country": "CA",
+    "currency": "CAD",
+    "slug": "canada"
+  },
+  {
+    "name": "Hongkong",
+    "country": "HK",
+    "currency": "HKD",
+    "slug": "hong-kong"
+  },
+  {
+    "name": "Spanien",
+    "country": "ES",
+    "currency": "EUR",
+    "slug": "spain"
+  },
+  {
+    "name": "Italien",
+    "country": "IT",
+    "currency": "EUR",
+    "slug": "italy"
+  },
+  {
+    "name": "Südafrika",
+    "country": "ZA",
+    "currency": "ZAR",
+    "slug": "south-africa"
+  },
+  {
+    "name": "Österreich",
+    "country": "AT",
+    "currency": "EUR",
+    "slug": "austria"
+  },
+  {
+    "name": "Tschechien",
+    "country": "CZ",
+    "currency": "CZK",
+    "slug": "czech-republic"
+  },
+  {
+    "name": "Saudi-Arabien",
+    "country": "SA",
+    "currency": "SAR",
+    "slug": "saudi-arabia"
+  },
+  {
+    "name": "Schweiz",
+    "country": "CH",
+    "currency": "CHF",
+    "slug": "switzerland"
+  },
+  {
+    "name": "Indien",
+    "country": "IN",
+    "currency": "INR",
+    "slug": "india"
+  },
+  {
+    "name": "Mexiko",
+    "country": "MX",
+    "currency": "MXN",
+    "slug": "mexico"
+  },
+  {
+    "name": "Bahrain",
+    "country": "BH",
+    "currency": "BHD",
+    "slug": "bahrain"
+  },
+  {
+    "name": "Oman",
+    "country": "OM",
+    "currency": "OMR",
+    "slug": "oman"
+  },
+  {
+    "name": "Vereinigte Arabische Emirate",
+    "country": "AE",
+    "currency": "AED",
+    "slug": "united-arab-emirates"
+  },
+  {
+    "name": "Kuwait",
+    "country": "KW",
+    "currency": "KWD",
+    "slug": "kuwait"
+  },
+  {
+    "name": "Libanon",
+    "country": "LB",
+    "currency": "USD",
+    "slug": "lebanon"
+  },
+  {
+    "name": "Niederlande",
+    "country": "NL",
+    "currency": "EUR",
+    "slug": "netherlands"
+  },
+  {
+    "name": "Katar",
+    "country": "QA",
+    "currency": "QAR",
+    "slug": "qatar"
+  },
+  {
+    "name": "Rumänien",
+    "country": "RO",
+    "currency": "RON",
+    "slug": "romania"
+  },
+  {
+    "name": "Schweden",
+    "country": "SE",
+    "currency": "SEK",
+    "slug": "sweden"
+  },
+  {
+    "name": "Belgien",
+    "country": "BE",
+    "currency": "EUR",
+    "slug": "belgium"
+  },
+  {
+    "name": "Norwegen",
+    "country": "NO",
+    "currency": "NOK",
+    "slug": "norway"
+  },
+  {
+    "name": "Slowakei",
+    "country": "SK",
+    "currency": "EUR",
+    "slug": "slovakia"
+  },
+  {
+    "name": "Portugal",
+    "country": "PT",
+    "currency": "EUR",
+    "slug": "portugal"
+  },
+  {
+    "name": "Bulgarien",
+    "country": "BG",
+    "currency": "EUR",
+    "slug": "bulgaria"
+  },
+  {
+    "name": "Türkei",
+    "country": "TR",
+    "currency": "TRY",
+    "slug": "turkey"
+  },
+  {
+    "name": "Finnland",
+    "country": "FI",
+    "currency": "EUR",
+    "slug": "finland"
+  },
+  {
+    "name": "Dänemark",
+    "country": "DK",
+    "currency": "DKK",
+    "slug": "denmark"
+  },
+  {
+    "name": "Irland",
+    "country": "IE",
+    "currency": "EUR",
+    "slug": "ireland"
+  },
+  {
+    "name": "Kolumbien",
+    "country": "CO",
+    "currency": "COP",
+    "slug": "colombia"
+  },
+  {
+    "name": "Luxemburg",
+    "country": "LU",
+    "currency": "EUR",
+    "slug": "luxembourg"
+  },
+  {
+    "name": "Neuseeland",
+    "country": "NZ",
+    "currency": "NZD",
+    "slug": "new-zealand"
+  },
+  {
+    "name": "Griechenland",
+    "country": "GR",
+    "currency": "EUR",
+    "slug": "greece"
+  },
+  {
+    "name": "Indonesien",
+    "country": "ID",
+    "currency": "IDR",
+    "slug": "indonesia"
+  },
+  {
+    "name": "Peru",
+    "country": "PE",
+    "currency": "PEN",
+    "slug": "peru"
+  },
+  {
+    "name": "Japan",
+    "country": "JP",
+    "currency": "JPY",
+    "slug": "japan"
+  },
+  {
+    "name": "Singapur",
+    "country": "SG",
+    "currency": "SGD",
+    "slug": "singapore"
+  },
+  {
+    "name": "Argentinien",
+    "country": "AR",
+    "currency": "ARS",
+    "slug": "argentina"
+  },
+  {
+    "name": "Chile",
+    "country": "CL",
+    "currency": "CLP",
+    "slug": "chile"
+  },
+  {
+    "name": "Malaysia",
+    "country": "MY",
+    "currency": "MYR",
+    "slug": "malaysia"
+  },
+  {
+    "name": "Taiwan",
+    "country": "TW",
+    "currency": "TWD",
+    "slug": "taiwan"
+  },
+  {
+    "name": "Thailand",
+    "country": "TH",
+    "currency": "THB",
+    "slug": "thailand"
+  },
+  {
+    "name": "Kroatien",
+    "country": "HR",
+    "currency": "EUR",
+    "slug": "croatia"
+  },
+  {
+    "name": "Israel",
+    "country": "IL",
+    "currency": "ILS",
+    "slug": "israel"
+  },
+  {
+    "name": "Südkorea",
+    "country": "KR",
+    "currency": "KRW",
+    "slug": "south-korea"
+  }
+]

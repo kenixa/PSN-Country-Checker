@@ -1,0 +1,14 @@
+{
+  "generatedAt": null,
+  "generatedAtIso": null,
+  "deals": [],
+  "allDeals": [],
+  "regionCount": 53,
+  "regionsScannedThisRun": 0,
+  "regionsSucceededThisRun": 0,
+  "regionsFailedThisRun": 0,
+  "regionsSucceeded": 0,
+  "regionStatus": {},
+  "productsFoundThisRun": 0,
+  "note": "Der erste automatische Scan wird beim ersten GitHub-Actions-Lauf durchgeführt."
+}
