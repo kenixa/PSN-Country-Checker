@@ -27,12 +27,14 @@ REGIONS = json.loads((ROOT / "scripts" / "regions.json").read_text(encoding="utf
 REGION_BY_CODE = {r["country"]: r for r in REGIONS}
 PRIORITY = ["AU", "NL", "DE"]  # always refreshed: Australia, Netherlands, Germany
 COUNTRY_BATCH_SIZE = 10
-MAX_PROXY_CANDIDATES = 18
+MAX_PROXY_CANDIDATES = 48
 MAX_VALID_PROXIES = 3
 MAX_REGION_WORKERS = 5
-MAX_PROXY_WORKERS = 10
+MAX_PROXY_WORKERS = 20
 DEAL_MAX_AGE_SECONDS = 60 * 60
 GERMAN_PSN_CATEGORY_URL = "https://www.eneba.com/store/psn-gift-cards/germany"
+# The detail page includes Eneba's denomination picker for German PSN cards.
+GERMAN_PSN_DETAIL_URL = "https://www.eneba.com/psn-playstation-network-card-60-eur-de-psn-key-germany"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
@@ -132,22 +134,25 @@ def is_public_ipv4(ip: str) -> bool:
 
 
 def get_proxy_candidates(country: str) -> list[str]:
-    """Read country-filtered lists from several free sources; never trust blindly."""
+    """Collect a diverse candidate pool from several free country-filtered lists."""
     cc = country.lower()
     urls = [
         f"https://raw.githubusercontent.com/ProxyScrape/free-proxy-list/main/proxies/countries/{cc}/http/data.txt",
         f"https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/by-country/{country}.txt",
         f"https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/by-country/{cc}/http.txt",
+        # Mixed-protocol list; the live HTTPS exit-IP check filters unsupported entries.
+        f"https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/{country}/data.txt",
     ]
     found: list[str] = []
     seen: set[str] = set()
+    per_source_limit = max(8, MAX_PROXY_CANDIDATES // len(urls))
     for url in urls:
+        source_count = 0
         try:
             response = SESSION.get(url, timeout=(4, 8))
             if not response.ok:
                 continue
             for line in response.text.splitlines():
-                # Public lists are IP:PORT text; ignore comments and other formats.
                 m = re.search(r"(?<![\w.])((?:\d{1,3}\.){3}\d{1,3}):(\d{1,5})(?!\d)", line.strip())
                 if not m:
                     continue
@@ -157,36 +162,39 @@ def get_proxy_candidates(country: str) -> list[str]:
                     continue
                 seen.add(proxy)
                 found.append(proxy)
-            if len(found) >= MAX_PROXY_CANDIDATES:
-                break
+                source_count += 1
+                if source_count >= per_source_limit:
+                    break
         except Exception as exc:
             log(f"Proxyquelle nicht verfügbar für {country}: {urlparse(url).netloc} ({exc})")
-    # If source ordering is stale, a small random shuffle avoids repeatedly trying
-    # exactly the same dead endpoints. Keep the list bounded for a fast scan.
-    if len(found) > 4:
-        head, tail = found[:4], found[4:]
-        random.shuffle(tail)
-        found = head + tail
-    return found[:MAX_PROXY_CANDIDATES]
+    random.shuffle(found)
+    candidates = found[:MAX_PROXY_CANDIDATES]
+    log(f"{country}: {len(candidates)} Proxy-Kandidaten aus {len(urls)} Quellen")
+    return candidates
 
 
 def _verify_one_proxy(item: tuple[str, str]) -> tuple[str, str]:
+    """Confirm the actual exit country, falling back to a second Geo-IP endpoint."""
     proxy, expected_country = item
     proxy_url = f"http://{proxy}"
-    try:
-        r = requests.get(
-            "https://ipwho.is/",
-            proxies={"http": proxy_url, "https": proxy_url},
-            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
-            timeout=(3, 5),
-        )
-        if not r.ok:
-            return proxy, ""
-        data = r.json()
-        got = str(data.get("country_code") or "").upper()
-        return proxy, got if got == expected_country else ""
-    except Exception:
-        return proxy, ""
+    proxy_cfg = {"http": proxy_url, "https": proxy_url}
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    checks = (
+        ("https://ipwho.is/", "country_code"),
+        ("https://ipapi.co/json/", "country_code"),
+    )
+    for url, field in checks:
+        try:
+            response = requests.get(url, proxies=proxy_cfg, headers=headers, timeout=(2.5, 4))
+            if not response.ok:
+                continue
+            data = response.json()
+            got = str(data.get(field) or "").upper()
+            if got:
+                return proxy, got if got == expected_country else ""
+        except Exception:
+            continue
+    return proxy, ""
 
 
 def verify_country_proxies(country: str, candidates: list[str]) -> list[str]:
@@ -209,18 +217,25 @@ def verify_country_proxies(country: str, candidates: list[str]) -> list[str]:
 
 
 def title_and_nominal(anchor) -> tuple[str, float, str] | None:
-    title = ""
+    # Eneba's denomination picker stores its full title in aria-label while visible
+    # text often only contains "60 EUR · €47.71 · 1.26 EUR per €1".
     img = anchor.find("img", alt=True)
+    title = ""
     if img:
         title = str(img.get("alt") or "").strip()
-    title = title or str(anchor.get("title") or "").strip() or anchor.get_text(" ", strip=True)
-    # The card title includes its denomination (e.g. 60 EUR, 100 USD).
+    title = (
+        title
+        or str(anchor.get("title") or "").strip()
+        or str(anchor.get("aria-label") or "").strip()
+        or str(anchor.get("data-testid") or "").strip()
+        or anchor.get_text(" ", strip=True)
+    )
     pat = re.compile(r"PlayStation\s+Network\s+Card\s+(" + NUMBER + r")\s+([A-Z]{3})\b", re.I)
-    m = pat.search(title)
-    if not m:
+    match = pat.search(title)
+    if not match:
         return None
-    amount = parse_number(m.group(1))
-    currency = m.group(2).upper()
+    amount = parse_number(match.group(1))
+    currency = match.group(2).upper()
     if not amount or currency not in CURRENCY_CODES:
         return None
     return title, amount, currency
@@ -237,28 +252,82 @@ def is_german_psn_card(title: str, nominal_currency: str) -> bool:
     )
 
 
-def price_from_card_text(text: str, fallback_currency: str) -> tuple[float, str] | None:
+def price_from_card_text(
+    text: str,
+    fallback_currency: str,
+    nominal_amount: float | None = None,
+    nominal_currency: str | None = None,
+) -> tuple[float, str] | None:
+    """Extract seller price without mistaking '5% cashback' or face value for price."""
     text = re.sub(r"\s+", " ", text).strip()
-    # Prefer the explicit card entry price to avoid reading the denomination in its title.
-    patterns = [
-        re.compile(r"\b(?:from|ab|à\s+partir\s+de)\s*(?:([A-Z]{3})\s*)?([€£$])?\s*(" + NUMBER + r")", re.I),
-        re.compile(r"\b(" + CURRENCY_ALT + r")\s*(" + NUMBER + r")\b", re.I),
-        re.compile(r"([€£$])\s*(" + NUMBER + r")")
-    ]
-    for ix, pattern in enumerate(patterns):
-        m = pattern.search(text)
-        if not m:
+    fallback_currency = str(fallback_currency or "EUR").upper()
+    nominal_currency = str(nominal_currency or "").upper()
+
+    # 1) An explicit "from/ab" prefix identifies the seller price, including PLN/SEK/etc.
+    explicit = re.compile(
+        r"\b(?:from|ab|à\s+partir\s+de)\s*"
+        r"(?:(?P<before>" + CURRENCY_ALT + r")\s*)?"
+        r"(?P<symbol>[€£$])?\s*"
+        r"(?P<amount>" + NUMBER + r")\s*"
+        r"(?P<after>" + CURRENCY_ALT + r")?\b",
+        re.I,
+    )
+    m = explicit.search(text)
+    if m:
+        code = (m.group("before") or m.group("after") or "").upper()
+        symbol = m.group("symbol")
+        currency = code or ("EUR" if symbol == "€" else "GBP" if symbol == "£" else fallback_currency)
+        amount = parse_number(m.group("amount"))
+        if amount and currency in CURRENCY_CODES:
+            # A symbol/code can appear in incidental text, so never accept nominal face value here
+            # unless the explicit "from" price is truly the same number (rare but valid).
+            return amount, currency
+
+    # 2) Visible currency symbols mark the actual price more reliably than "EUR per €1".
+    symbol_pattern = re.compile(r"([€£$])\s*(" + NUMBER + r")")
+    for m in symbol_pattern.finditer(text):
+        # The reference amount in "EUR per €1" is not the selling price.
+        prefix = text[max(0, m.start() - 12):m.start()].lower()
+        if re.search(r"\b(?:per|pro)\s*$", prefix):
             continue
-        if ix == 0:
-            currency_code, symbol, raw = m.group(1), m.group(2), m.group(3)
-        elif ix == 1:
-            currency_code, symbol, raw = m.group(1), None, m.group(2)
-        else:
-            currency_code, symbol, raw = None, m.group(1), m.group(2)
-        currency = (currency_code or ("EUR" if symbol == "€" else "GBP" if symbol == "£" else fallback_currency)).upper()
-        amount = parse_number(raw)
+        symbol = m.group(1)
+        currency = "EUR" if symbol == "€" else "GBP" if symbol == "£" else fallback_currency
+        amount = parse_number(m.group(2))
         if amount and currency in CURRENCY_CODES:
             return amount, currency
+
+    # 3) Localized prices can be rendered as "563.92 SEK" without a currency symbol.
+    # Search fallback-currency occurrences first and skip the face value in the product title.
+    pairs: list[tuple[float, str]] = []
+    amount_code = re.compile(r"(" + NUMBER + r")\s*(" + CURRENCY_ALT + r")\b", re.I)
+    code_amount = re.compile(r"\b(" + CURRENCY_ALT + r")\s*(" + NUMBER + r")", re.I)
+    for match in amount_code.finditer(text):
+        amount = parse_number(match.group(1))
+        currency = match.group(2).upper()
+        if amount and currency in CURRENCY_CODES:
+            pairs.append((amount, currency))
+    for match in code_amount.finditer(text):
+        amount = parse_number(match.group(2))
+        currency = match.group(1).upper()
+        if amount and currency in CURRENCY_CODES:
+            pairs.append((amount, currency))
+
+    # Preserve textual order where possible, then prefer the storefront's locale currency.
+    if pairs:
+        non_face_value = [
+            pair for pair in pairs
+            if not (
+                nominal_amount is not None
+                and pair[1] == nominal_currency
+                and abs(pair[0] - float(nominal_amount)) < 1e-6
+            )
+        ]
+        pool = non_face_value or pairs
+        locale_pairs = [pair for pair in pool if pair[1] == fallback_currency]
+        if locale_pairs:
+            return locale_pairs[0]
+        return pool[0]
+
     return None
 
 
@@ -297,7 +366,7 @@ def extract_deals(html: str, region: dict, checked_ms: int) -> list[dict]:
                     break
         if not best_text:
             best_text = anchor.parent.get_text(" ", strip=True) if anchor.parent else anchor.get_text(" ", strip=True)
-        price = price_from_card_text(best_text, region["currency"])
+        price = price_from_card_text(best_text, region["currency"], nominal_amount, nominal_currency)
         if not price:
             continue
         price_amount, price_currency = price
@@ -318,41 +387,76 @@ def extract_deals(html: str, region: dict, checked_ms: int) -> list[dict]:
 
 def fetch_region(region: dict) -> dict:
     country = region["country"]
-    # Important: keep the product market fixed to Germany. Only the verified proxy
-    # changes, so AU/NL results describe German cards viewed from those countries.
-    path = GERMAN_PSN_CATEGORY_URL
+    # The proxy changes only the request exit country; both pages show German PSN cards.
+    # The detail page has the denomination picker and catches variants missing in category cards.
+    paths = (GERMAN_PSN_DETAIL_URL, GERMAN_PSN_CATEGORY_URL)
     candidates = get_proxy_candidates(country)
     if not candidates:
         return {"country": country, "ok": False, "deals": [], "reason": "Keine Proxy-Kandidaten gefunden"}
     valid_proxies = verify_country_proxies(country, candidates)
     if not valid_proxies:
         return {"country": country, "ok": False, "deals": [], "reason": "Keine erreichbare Proxy-IP aus diesem Land bestätigt"}
-    errors = []
+
+    errors: list[str] = []
     for proxy in valid_proxies:
         proxy_url = f"http://{proxy}"
-        try:
-            response = requests.get(
-                path,
-                proxies={"http": proxy_url, "https": proxy_url},
-                headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8", "Cache-Control": "no-cache"},
-                timeout=(5, 14),
-                allow_redirects=True,
-            )
-            if response.status_code != 200:
-                errors.append(f"Eneba HTTP {response.status_code}")
-                continue
-            final = urlparse(response.url)
-            if final.scheme != "https" or final.hostname not in ("www.eneba.com", "eneba.com"):
-                errors.append("Unerwartetes Weiterleitungsziel")
-                continue
-            if "text/html" not in response.headers.get("content-type", "").lower():
-                errors.append("Eneba lieferte kein HTML")
-                continue
-            deals = extract_deals(response.text[:3_000_000], region, timestamp_ms())
-            return {"country": country, "ok": True, "deals": deals, "reason": "" if deals else "Seite geladen, aber keine Kartenpreise erkannt"}
-        except Exception as exc:
-            errors.append(type(exc).__name__)
-    return {"country": country, "ok": False, "deals": [], "reason": "; ".join(errors[-3:]) or "Proxyabruf fehlgeschlagen"}
+        proxy_cfg = {"http": proxy_url, "https": proxy_url}
+        combined: list[dict] = []
+        any_page_loaded = False
+        for path in paths:
+            try:
+                response = requests.get(
+                    path,
+                    proxies=proxy_cfg,
+                    headers={
+                        "User-Agent": USER_AGENT,
+                        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Cache-Control": "no-cache",
+                    },
+                    timeout=(4, 10),
+                    allow_redirects=True,
+                )
+                if response.status_code != 200:
+                    errors.append(f"{urlparse(path).path}: HTTP {response.status_code}")
+                    continue
+                final = urlparse(response.url)
+                if final.scheme != "https" or final.hostname not in ("www.eneba.com", "eneba.com"):
+                    errors.append("Unerwartetes Weiterleitungsziel")
+                    continue
+                if "text/html" not in response.headers.get("content-type", "").lower():
+                    errors.append("Eneba lieferte kein HTML")
+                    continue
+                any_page_loaded = True
+                combined.extend(extract_deals(response.text[:3_000_000], region, timestamp_ms()))
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+
+        if combined:
+            # If both pages expose the same variant, keep the lower price (same currency).
+            deduped: dict[str, dict] = {}
+            for deal in combined:
+                key = str(deal.get("href") or "")
+                old = deduped.get(key)
+                if old is None:
+                    deduped[key] = deal
+                    continue
+                new_currency = str(deal.get("priceCurrency") or "EUR")
+                old_currency = str(old.get("priceCurrency") or "EUR")
+                new_amount = float(deal.get("priceAmount") or 0)
+                old_amount = float(old.get("priceAmount") or 0)
+                if new_currency == old_currency and new_amount > 0 and (old_amount <= 0 or new_amount < old_amount):
+                    deduped[key] = deal
+            return {"country": country, "ok": True, "deals": list(deduped.values()), "reason": ""}
+
+        if any_page_loaded:
+            errors.append("Seiten geladen, aber keine deutschen Kartenvarianten erkannt")
+    return {
+        "country": country,
+        "ok": False,
+        "deals": [],
+        "reason": "; ".join(errors[-4:]) or "Proxyabruf fehlgeschlagen",
+    }
 
 
 def get_site_data_url() -> str | None:
