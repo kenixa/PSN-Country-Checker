@@ -48,7 +48,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_RUN_NUMBER: ${{ github.run_number }}
           SITE_BASE_URL: ${{ steps.pages.outputs.base_url }}
-        run: python scripts/update_data.py
+        run: python scripts/run_browser_scan.py
 
       - name: GitHub-Pages-Artefakt erstellen
         uses: actions/upload-pages-artifact@v3
