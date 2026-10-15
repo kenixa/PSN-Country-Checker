@@ -137,10 +137,17 @@ def get_proxy_candidates(country: str) -> list[str]:
     """Collect a diverse candidate pool from several free country-filtered lists."""
     cc = country.lower()
     urls = [
+        # Official public ProxyScrape API, filtered to HTTP proxies and target country.
+        (
+            "https://api.proxyscrape.com/v4/free-proxy-list/get"
+            f"?request=display_proxies&proxy_format=protocolipport&format=text&country={cc}&protocol=http"
+        ),
+        # Official ProxyScrape mirror/CDN, country + HTTP protocol shard.
+        f"https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/countries/{cc}/http/data.txt",
         f"https://raw.githubusercontent.com/ProxyScrape/free-proxy-list/main/proxies/countries/{cc}/http/data.txt",
         f"https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/by-country/{country}.txt",
         f"https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/by-country/{cc}/http.txt",
-        # Mixed-protocol list; the live HTTPS exit-IP check filters unsupported entries.
+        # Proxifly's country shard may contain mixed protocols; explicit non-HTTP schemes are filtered below.
         f"https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/{country}/data.txt",
     ]
     found: list[str] = []
@@ -153,7 +160,12 @@ def get_proxy_candidates(country: str) -> list[str]:
             if not response.ok:
                 continue
             for line in response.text.splitlines():
-                m = re.search(r"(?<![\w.])((?:\d{1,3}\.){3}\d{1,3}):(\d{1,5})(?!\d)", line.strip())
+                line = line.strip()
+                scheme_match = re.match(r"^(https?|socks4|socks5)://", line, re.I)
+                if scheme_match and scheme_match.group(1).lower() != "http":
+                    # Requests below are configured for plain HTTP proxies only.
+                    continue
+                m = re.search(r"(?<![\w.])((?:\d{1,3}\.){3}\d{1,3}):(\d{1,5})(?!\d)", line)
                 if not m:
                     continue
                 ip, port = m.group(1), int(m.group(2))
@@ -190,8 +202,9 @@ def _verify_one_proxy(item: tuple[str, str]) -> tuple[str, str]:
                 continue
             data = response.json()
             got = str(data.get(field) or "").upper()
-            if got:
-                return proxy, got if got == expected_country else ""
+            if got == expected_country:
+                return proxy, got
+            # Try the next GeoIP provider before rejecting this proxy.
         except Exception:
             continue
     return proxy, ""
@@ -572,7 +585,8 @@ def main() -> int:
             if result["ok"]:
                 kept_deals = [d for d in kept_deals if d.get("country") != region["country"]]
                 kept_deals.extend(result["deals"])
-            log(f"{region['country']}: {'OK' if result['ok'] else 'nicht verfügbar'} · {len(result['deals'])} Treffer")
+            detail = "" if result["ok"] else f" · Grund: {result.get('reason') or 'unbekannt'}"
+            log(f"{region['country']}: {'OK' if result['ok'] else 'nicht verfügbar'} · {len(result['deals'])} Treffer{detail}")
 
     # Recompute latest ranking using current FX data; stale entries are discarded.
     all_deals = []
@@ -599,7 +613,7 @@ def main() -> int:
         "note": note,
         "updateIntervalMinutes": 5,
         "dealDataMaxAgeMinutes": DEAL_MAX_AGE_SECONDS // 60,
-        "proxySources": ["ProxyScrape", "HProxy", "Databay"],
+        "proxySources": ["ProxyScrape API", "ProxyScrape CDN", "HProxy", "Databay", "Proxifly"],
     }
     DOCS.mkdir(parents=True, exist_ok=True)
     DATA_FILE.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
