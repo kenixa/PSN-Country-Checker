@@ -40,7 +40,7 @@ function renderDeals(data) {
         <a class="deal-title" href="${esc(deal.href)}" target="_blank" rel="noopener noreferrer">${esc(deal.title)}</a>
         <div class="deal-meta"><span class="country-pill">${esc(deal.region)}</span><span>Nennwert ${esc(deal.nominal)}</span><span>Stand ${esc(ageText(Date.now() - Number(deal.refreshedAt || data.generatedAt)))}</span></div>
       </div>
-      <div class="deal-value"><div class="ratio">${Number(deal.ratio).toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})}</div><div class="per">Guthaben pro €1</div><div class="deal-price">${esc(deal.price)}</div><div class="deal-nominal">Wert: ${Number(deal.nominalEur).toLocaleString('de-DE',{style:'currency',currency:'EUR'})}</div></div>
+      <div class="deal-value"><div class="ratio">${esc(deal.ratioDisplay ?? String(deal.ratio ?? ''))}</div><div class="per">Eneba: EUR per €1</div><div class="deal-price">${esc(deal.priceDisplay || deal.price)}</div><div class="deal-nominal">Wert: ${Number(deal.nominalEur).toLocaleString('de-DE',{style:'currency',currency:'EUR'})}</div></div>
     </article>`).join('');
 }
 function showData(data) {
