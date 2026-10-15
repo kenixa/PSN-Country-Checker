@@ -19,6 +19,7 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
@@ -457,9 +458,11 @@ def extract_deals(html: str, region: dict, checked_ms: int) -> list[dict]:
 
         ratio_value, ratio_display, ratio_text = ratio
         price_amount, price_currency, price_display = price
+        best_value_badge = bool(re.search(r"\bBest\s+value\b", anchor.get_text(" ", strip=True), re.I))
         deals.append({
             "title": title,
             "href": href,
+            "isBestValue": best_value_badge,
             "region": f'{region["name"]} (Abruf-IP)',
             "country": region["country"],
             "productCountry": "DE",
@@ -479,75 +482,108 @@ def extract_deals(html: str, region: dict, checked_ms: int) -> list[dict]:
 
 
 def fetch_region(region: dict) -> dict:
+    """Render Eneba like a real browser, then read only its displayed ratio and price."""
     country = region["country"]
-    # The proxy changes only the request exit country; both pages show German PSN cards.
-    # The detail page has the denomination picker and catches variants missing in category cards.
     paths = (GERMAN_PSN_DETAIL_URL, GERMAN_PSN_CATEGORY_URL)
     candidates = get_proxy_candidates(country)
     if not candidates:
         return {"country": country, "ok": False, "deals": [], "reason": "Keine Proxy-Kandidaten gefunden"}
+
     valid_proxies = verify_country_proxies(country, candidates)
     if not valid_proxies:
-        return {"country": country, "ok": False, "deals": [], "reason": "Keine erreichbare Proxy-IP aus diesem Land bestätigt"}
+        return {
+            "country": country,
+            "ok": False,
+            "deals": [],
+            "reason": "Keine erreichbare Proxy-IP aus diesem Land bestätigt",
+        }
 
     errors: list[str] = []
     for proxy in valid_proxies:
         proxy_url = f"http://{proxy}"
-        proxy_cfg = {"http": proxy_url, "https": proxy_url}
         combined: list[dict] = []
-        any_page_loaded = False
-        for path in paths:
-            try:
-                response = requests.get(
-                    path,
-                    proxies=proxy_cfg,
-                    headers={
-                        "User-Agent": USER_AGENT,
-                        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-                        "Accept-Language": "en-US,en;q=0.9",
-                        "Cache-Control": "no-cache",
-                    },
-                    timeout=(4, 10),
-                    allow_redirects=True,
+        try:
+            # requests.get() can receive pre-hydration HTML without the visible variant picker.
+            # Chromium executes Eneba's page scripts, so the parser sees the same UI values.
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(
+                    headless=True,
+                    proxy={"server": proxy_url},
+                    args=["--no-sandbox", "--disable-dev-shm-usage"],
                 )
-                if response.status_code != 200:
-                    errors.append(f"{urlparse(path).path}: HTTP {response.status_code}")
-                    continue
-                final = urlparse(response.url)
-                if final.scheme != "https" or final.hostname not in ("www.eneba.com", "eneba.com"):
-                    errors.append("Unerwartetes Weiterleitungsziel")
-                    continue
-                if "text/html" not in response.headers.get("content-type", "").lower():
-                    errors.append("Eneba lieferte kein HTML")
-                    continue
-                any_page_loaded = True
-                combined.extend(extract_deals(response.text[:3_000_000], region, timestamp_ms()))
-            except Exception as exc:
-                errors.append(type(exc).__name__)
+                try:
+                    context = browser.new_context(
+                        user_agent=USER_AGENT,
+                        locale="en-US",
+                        viewport={"width": 1440, "height": 1000},
+                        ignore_https_errors=True,
+                    )
+                    page = context.new_page()
+                    page.set_default_navigation_timeout(25_000)
+
+                    for path in paths:
+                        try:
+                            response = page.goto(path, wait_until="domcontentloaded", timeout=25_000)
+                            if response is None:
+                                errors.append(f"{urlparse(path).path}: keine HTTP-Antwort")
+                                continue
+                            if response.status != 200:
+                                errors.append(f"{urlparse(path).path}: HTTP {response.status}")
+                                continue
+
+                            final = urlparse(page.url)
+                            if final.scheme != "https" or final.hostname not in ("www.eneba.com", "eneba.com"):
+                                errors.append("Unerwartetes Weiterleitungsziel")
+                                continue
+
+                            # Wait for the real, client-rendered denomination tiles. Class names
+                            # are only a wait hint; extract_deals also has structural fallbacks.
+                            try:
+                                page.wait_for_function(
+                                    """() => Array.from(document.querySelectorAll('a[href*="/psn-playstation-network-card-"]'))
+                                      .some(a => a.querySelector('.ANNnf5') && a.querySelector('.L5ErLT.w7tD3i'))""",
+                                    timeout=9_000,
+                                )
+                            except PlaywrightTimeoutError:
+                                page.wait_for_timeout(1_200)
+
+                            html = page.content()
+                            anchor_count = page.locator('a[href*="/psn-playstation-network-card-"]').count()
+                            ratio_count = page.locator('a[href*="/psn-playstation-network-card-"] .ANNnf5').count()
+                            page_deals = extract_deals(html[:4_000_000], region, timestamp_ms())
+                            log(
+                                f"{country}: Eneba DOM {urlparse(path).path} · "
+                                f"{anchor_count} Produktlinks · {ratio_count} Ratio-Labels · "
+                                f"{len(page_deals)} deutsche Angebote"
+                            )
+                            combined.extend(page_deals)
+                            # The detail-page value picker lists denominations. Avoid a redundant
+                            # category request if it already yielded direct Eneba ratios.
+                            if page_deals:
+                                break
+                        except PlaywrightTimeoutError:
+                            errors.append(f"{urlparse(path).path}: Browser-Timeout")
+                        except Exception as exc:
+                            errors.append(f"{urlparse(path).path}: {type(exc).__name__}")
+
+                    context.close()
+                finally:
+                    browser.close()
+        except Exception as exc:
+            errors.append(f"Browser/Proxy {type(exc).__name__}")
 
         if combined:
-            # If both pages expose the same variant, keep the lower price (same currency).
+            # Deduplicate repeated denomination links without recalculating Eneba's ratio.
             deduped: dict[str, dict] = {}
             for deal in combined:
                 key = str(deal.get("href") or "")
                 old = deduped.get(key)
-                if old is None:
-                    deduped[key] = deal
-                    continue
-                new_ratio = float(deal.get("ratio") or 0)
-                old_ratio = float(old.get("ratio") or 0)
-                if new_ratio > old_ratio:
+                if old is None or float(deal.get("ratio") or 0) > float(old.get("ratio") or 0):
                     deduped[key] = deal
             return {"country": country, "ok": True, "deals": list(deduped.values()), "reason": ""}
 
-        if any_page_loaded:
-            errors.append("Seiten geladen, aber keine deutschen Kartenvarianten erkannt")
-    return {
-        "country": country,
-        "ok": False,
-        "deals": [],
-        "reason": "; ".join(errors[-4:]) or "Proxyabruf fehlgeschlagen",
-    }
+    reason = "; ".join(errors[-5:]) or "Kein Eneba-Preisverhältnis direkt im gerenderten HTML gefunden"
+    return {"country": country, "ok": False, "deals": [], "reason": reason}
 
 
 def get_site_data_url() -> str | None:
@@ -588,16 +624,9 @@ def load_previous_data() -> dict:
 
 
 def select_regions() -> list[dict]:
-    priority = [REGION_BY_CODE[c] for c in PRIORITY if c in REGION_BY_CODE]
-    other = [r for r in REGIONS if r["country"] not in PRIORITY]
-    batches = [other[i:i + COUNTRY_BATCH_SIZE] for i in range(0, len(other), COUNTRY_BATCH_SIZE)]
-    try:
-        n = int(os.getenv("GITHUB_RUN_NUMBER", "1"))
-    except ValueError:
-        n = 1
-    batch = batches[(n - 1) % len(batches)] if batches else []
-    chosen = priority + batch
-    log(f"Diese Runde prüft {len(chosen)} Länder: " + ", ".join(r["country"] for r in chosen))
+    """Always scan only Australia, the Netherlands and Germany."""
+    chosen = [REGION_BY_CODE[c] for c in PRIORITY if c in REGION_BY_CODE]
+    log("Überwacht ausschließlich diese Länder: " + ", ".join(r["country"] for r in chosen))
     return chosen
 
 
@@ -630,7 +659,14 @@ def make_deals_ranked(deals: list[dict], now_ms: int) -> list[dict]:
         key = f'{d.get("href")}|{d.get("country")}'
         if key not in by_key or ratio_value > float(by_key[key].get("ratio") or 0):
             by_key[key] = d
-    return sorted(by_key.values(), key=lambda item: float(item.get("ratio") or 0), reverse=True)[:20]
+    # Eneba rounds the visible ratio to two decimals. If multiple cards tie on that
+    # displayed number, prefer Eneba's own "Best value" badge instead of inventing
+    # extra precision from a price or exchange rate.
+    return sorted(
+        by_key.values(),
+        key=lambda item: (float(item.get("ratio") or 0), bool(item.get("isBestValue"))),
+        reverse=True,
+    )[:20]
 
 
 def main() -> int:
@@ -645,13 +681,14 @@ def main() -> int:
         d for d in old_deals
         if isinstance(d, dict)
         and (now_ms - int(d.get("refreshedAt") or 0)) <= DEAL_MAX_AGE_SECONDS * 1000
+        and str(d.get("country") or "") in selected_codes
         and is_german_psn_card(str(d.get("title") or ""), str(d.get("nominalCurrency") or ""))
         and d.get("ratioSource") == "eneba_display"
         and d.get("ratioDisplay") is not None
     ]
 
     old_status = previous.get("regionStatus") if isinstance(previous.get("regionStatus"), dict) else {}
-    statuses = dict(old_status)
+    statuses = {code: status for code, status in old_status.items() if code in selected_codes}
     results: list[dict] = []
     with cf.ThreadPoolExecutor(max_workers=MAX_REGION_WORKERS) as pool:
         futures = {pool.submit(fetch_region, region): region for region in selected}
@@ -691,7 +728,7 @@ def main() -> int:
         "generatedAtIso": utc_iso(now_ms),
         "deals": ranked,
         "allDeals": all_deals,
-        "regionCount": len(REGIONS),
+        "regionCount": len(PRIORITY),
         "regionsScannedThisRun": len(selected),
         "regionsSucceededThisRun": succeeded,
         "regionsFailedThisRun": len(selected) - succeeded,
@@ -717,5 +754,5 @@ if __name__ == "__main__":
         log(f"Fataler Fehler: {type(exc).__name__}: {exc}")
         # Keep workflow publishing the site even if the scan fails.
         if not DATA_FILE.exists():
-            DATA_FILE.write_text(json.dumps({"generatedAt": timestamp_ms(), "deals": [], "regionCount": len(REGIONS), "regionsSucceeded": 0, "note": f"Scan fehlgeschlagen: {type(exc).__name__}. Bitte nächste Aktualisierung abwarten."}, ensure_ascii=False), encoding="utf-8")
+            DATA_FILE.write_text(json.dumps({"generatedAt": timestamp_ms(), "deals": [], "regionCount": len(PRIORITY), "regionsSucceeded": 0, "note": f"Scan fehlgeschlagen: {type(exc).__name__}. Bitte nächste Aktualisierung abwarten."}, ensure_ascii=False), encoding="utf-8")
         sys.exit(0)
